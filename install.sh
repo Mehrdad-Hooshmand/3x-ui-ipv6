@@ -98,11 +98,13 @@ gen_random_string() {
 install_acme() {
     echo -e "${green}Installing acme.sh for SSL certificate management...${plain}"
     cd ~ || return 1
-    curl -s https://get.acme.sh | sh >/dev/null 2>&1
+    curl -s https://get.acme.sh | sh
     if [ $? -ne 0 ]; then
         echo -e "${red}Failed to install acme.sh${plain}"
         return 1
     else
+        # Source the acme.sh environment
+        source ~/.bashrc 2>/dev/null || true
         echo -e "${green}acme.sh installed successfully${plain}"
     fi
     return 0
@@ -559,34 +561,83 @@ prompt_and_setup_ssl() {
     local web_base_path="$2"
     local server_ip="$3"
 
-    echo ""
-    echo -e "${green}═══════════════════════════════════════════${plain}"
-    echo -e "${green}     Automatic SSL Certificate Setup      ${plain}"
-    echo -e "${green}═══════════════════════════════════════════${plain}"
-    echo -e "${yellow}Setting up Let's Encrypt SSL for domain: ${PANEL_HOST}${plain}"
-    echo -e "${yellow}Certificate: 90-day validity with auto-renewal${plain}"
-    echo -e "${yellow}Port 80 must be open for certificate issuance${plain}"
-    echo ""
+    local ssl_choice=""
+
+    echo -e "${yellow}Choose SSL certificate setup method:${plain}"
     
-    # Stop panel if running
-    echo -e "${yellow}Stopping panel temporarily for SSL setup...${plain}"
-    if [[ $release == "alpine" ]]; then
-        rc-service x-ui stop >/dev/null 2>&1
+    # Check if domain is configured
+    if [[ "${PANEL_USE_DOMAIN}" == "true" && -n "${PANEL_HOST}" ]]; then
+        echo -e "${green}✓ Domain detected: ${PANEL_HOST}${plain}"
+        echo ""
+        echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
+        echo -e "${green}2.${plain} Skip SSL setup"
+        read -rp "Choose an option (default 1): " ssl_choice
+        ssl_choice="${ssl_choice// /}"
+        
+        [[ -z "${ssl_choice}" ]] && ssl_choice="1"
+        
+        if [[ "${ssl_choice}" == "1" ]]; then
+            echo -e "${green}Setting up SSL for domain: ${PANEL_HOST}${plain}"
+            # Use domain SSL setup
+            setup_ssl_certificate "${PANEL_HOST}" "${server_ip}" "${panel_port}" "${web_base_path}"
+            SSL_HOST="${PANEL_HOST}"
+        else
+            echo -e "${yellow}Skipping SSL setup${plain}"
+            SSL_HOST="${PANEL_HOST}"
+        fi
     else
-        systemctl stop x-ui >/dev/null 2>&1
-    fi
-    
-    # Always use domain SSL
-    echo -e "${green}Issuing SSL certificate for domain: ${PANEL_HOST}${plain}"
-    setup_ssl_certificate "${PANEL_HOST}" "${server_ip}" "${panel_port}" "${web_base_path}"
-    
-    if [ $? -eq 0 ]; then
-        SSL_HOST="${PANEL_HOST}"
-        echo -e "${green}✓ SSL certificate configured successfully!${plain}"
-    else
-        echo -e "${red}✗ SSL certificate setup failed${plain}"
-        echo -e "${yellow}You can try again later with: x-ui${plain}"
-        SSL_HOST="${PANEL_HOST}"
+        # IP-based panel - use PANEL_SERVER_IP instead of PANEL_HOST
+        local actual_ip="${PANEL_SERVER_IP:-${server_ip}}"
+        echo -e "${green}Panel configured with IP: ${actual_ip}${plain}"
+        echo ""
+        echo -e "${green}1.${plain} Let's Encrypt for IP Address (6-day validity, auto-renews)"
+        echo -e "${green}2.${plain} Skip SSL setup"
+        echo -e "${blue}Note:${plain} IP certificates require port 80 open and use shortlived profile."
+        read -rp "Choose an option (default 1): " ssl_choice
+        ssl_choice="${ssl_choice// /}"
+        
+        [[ -z "${ssl_choice}" ]] && ssl_choice="1"
+        
+        if [[ "${ssl_choice}" == "1" ]]; then
+            echo -e "${green}Setting up SSL for IP: ${actual_ip}${plain}"
+            
+            # Stop panel if running
+            if [[ $release == "alpine" ]]; then
+                rc-service x-ui stop >/dev/null 2>&1
+            else
+                systemctl stop x-ui >/dev/null 2>&1
+            fi
+            
+            # Check if server_ip is IPv6
+            if is_ipv6 "${actual_ip}"; then
+                echo -e "${green}✓ IPv6 detected${plain}"
+                setup_ipv6_only_certificate "${actual_ip}"
+            else
+                # IPv4 - check if user also has IPv6
+                if [[ -n "${detected_ipv6}" ]]; then
+                    echo ""
+                    read -rp "Do you also want to add IPv6 (${detected_ipv6}) to certificate? (y/n, default n): " add_ipv6
+                    if [[ "${add_ipv6}" == "y" || "${add_ipv6}" == "Y" ]]; then
+                        setup_ip_certificate "${actual_ip}" "${detected_ipv6}"
+                    else
+                        setup_ip_certificate "${actual_ip}" ""
+                    fi
+                else
+                    setup_ip_certificate "${actual_ip}" ""
+                fi
+            fi
+            
+            if [ $? -eq 0 ]; then
+                SSL_HOST="${actual_ip}"
+                echo -e "${green}✓ SSL certificate configured successfully${plain}"
+            else
+                echo -e "${red}✗ SSL setup failed${plain}"
+                SSL_HOST="${actual_ip}"
+            fi
+        else
+            echo -e "${yellow}Skipping SSL setup${plain}"
+            SSL_HOST="${actual_ip}"
+        fi
     fi
 }
 
@@ -660,10 +711,8 @@ ask_for_panel_ip() {
     echo -e "${yellow}STEP 1: Select IP Type${plain}"
     echo -e "${blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${plain}"
     echo ""
-    echo -e "${yellow}Which IP version does your server use?${plain}"
-    echo ""
-    echo -e "${green}1.${plain} IPv4 (مثال: 192.168.1.100)"
-    echo -e "${green}2.${plain} IPv6 (مثال: 2001:db8::1)"
+    echo -e "${green}1.${plain} IPv4"
+    echo -e "${green}2.${plain} IPv6"
     echo ""
     read -rp "Choose IP type (1 or 2): " ip_type
     ip_type="${ip_type// /}"
@@ -731,50 +780,49 @@ ask_for_panel_ip() {
         fi
     fi
     
-    # Step 3: Enter Domain (Required)
+    # Step 3: Choose panel host (IP or Domain)
     echo ""
     echo -e "${blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${plain}"
-    echo -e "${yellow}STEP 3: Domain Configuration (Required)${plain}"
+    echo -e "${yellow}STEP 3: Panel Access Configuration${plain}"
     echo -e "${blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${plain}"
     echo ""
-    echo -e "${yellow}Enter your domain name for panel access:${plain}"
-    echo -e "${yellow}دامنه خود را برای دسترسی به پنل وارد کنید:${plain}"
+    echo -e "${yellow}Do you want to access panel via IP or Domain?${plain}"
     echo ""
-    echo -e "${green}Example:${plain} panel.example.com"
-    echo -e "${yellow}Note:${plain} Domain must point to: ${selected_panel_ip}"
-    
-    # Check DNS first
-    if [[ "${ip_type}" == "2" ]]; then
-        echo -e "${yellow}DNS Record:${plain} AAAA → ${selected_panel_ip}"
-    else
-        echo -e "${yellow}DNS Record:${plain} A → ${selected_panel_ip}"
-    fi
-    
+    echo -e "${green}1.${plain} IP Address  (https://${selected_panel_ip}:port/path)"
+    echo -e "${green}2.${plain} Domain Name (https://yourdomain.com:port/path)"
     echo ""
+    read -rp "Choose access method (1 or 2, default 1): " access_choice
+    access_choice="${access_choice// /}"
     
-    # Loop until valid domain entered
-    while true; do
+    [[ -z "${access_choice}" ]] && access_choice="1"
+    
+    if [[ "${access_choice}" == "2" ]]; then
+        # User wants domain
+        echo ""
+        echo -e "${yellow}Enter your domain name:${plain}"
+        echo -e "${yellow}(Example: panel.example.com)${plain}"
         read -rp "Domain: " user_domain
         user_domain="${user_domain// /}"
         
         if [[ -z "${user_domain}" ]]; then
-            echo -e "${red}✗ Domain cannot be empty!${plain}"
-            echo -e "${yellow}Please enter a valid domain name${plain}"
-            continue
+            echo -e "${yellow}⚠ No domain entered, using IP instead${plain}"
+            panel_host="${selected_panel_ip}"
+            use_domain=false
+        elif ! is_domain "${user_domain}"; then
+            echo -e "${yellow}⚠ Invalid domain format, using IP instead${plain}"
+            panel_host="${selected_panel_ip}"
+            use_domain=false
+        else
+            panel_host="${user_domain}"
+            use_domain=true
+            echo -e "${green}✓ Domain confirmed: ${panel_host}${plain}"
         fi
-        
-        if ! is_domain "${user_domain}"; then
-            echo -e "${red}✗ Invalid domain format!${plain}"
-            echo -e "${yellow}Example: panel.example.com${plain}"
-            continue
-        fi
-        
-        # Domain is valid
-        panel_host="${user_domain}"
-        use_domain=true
-        echo -e "${green}✓ Domain confirmed: ${panel_host}${plain}"
-        break
-    done
+    else
+        # User wants IP
+        panel_host="${selected_panel_ip}"
+        use_domain=false
+        echo -e "${green}✓ Panel will be accessed via IP: ${panel_host}${plain}"
+    fi
     
     # Summary
     echo ""
