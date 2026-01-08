@@ -98,14 +98,20 @@ gen_random_string() {
 install_acme() {
     echo -e "${green}Installing acme.sh for SSL certificate management...${plain}"
     cd ~ || return 1
-    curl -s https://get.acme.sh | sh
+    curl https://get.acme.sh | sh -s -- force
     if [ $? -ne 0 ]; then
         echo -e "${red}Failed to install acme.sh${plain}"
         return 1
     else
         # Source the acme.sh environment
         source ~/.bashrc 2>/dev/null || true
-        echo -e "${green}acme.sh installed successfully${plain}"
+        # Check if installed
+        if [ -f ~/.acme.sh/acme.sh ]; then
+            echo -e "${green}acme.sh installed successfully${plain}"
+        else
+            echo -e "${red}acme.sh installation failed${plain}"
+            return 1
+        fi
     fi
     return 0
 }
@@ -170,7 +176,16 @@ setup_ssl_certificate() {
     
     if [[ -f "$webCertFile" && -f "$webKeyFile" ]]; then
         ${xui_folder}/x-ui cert -webCert "$webCertFile" -webCertKey "$webKeyFile" >/dev/null 2>&1
+        
+        # Set webDomain in panel settings for proper URL generation
+        sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '${domain}');" >/dev/null 2>&1
+        
+        # Fix listen addresses for existing inbounds - change :: or IPv6 addresses to domain for proper URL generation
+        # This prevents "Invalid URL" JavaScript errors in panel QR code/copy functionality
+        sqlite3 /etc/x-ui/x-ui.db "UPDATE inbounds SET listen = '${domain}' WHERE listen = '::' OR listen LIKE '%:%:%';" >/dev/null 2>&1
+        
         echo -e "${green}SSL certificate installed and configured successfully!${plain}"
+        echo -e "${green}Panel domain set to: ${domain}${plain}"
         return 0
     else
         echo -e "${yellow}Certificate files not found${plain}"
@@ -277,7 +292,14 @@ setup_ipv6_only_certificate() {
         echo -e "${green}Certificate paths configured successfully${plain}"
     fi
 
+    # Set webDomain to IPv6 for panel URL generation
+    sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '[${ipv6}]');" >/dev/null 2>&1
+    
+    # Fix listen addresses for existing inbounds
+    sqlite3 /etc/x-ui/x-ui.db "UPDATE inbounds SET listen = '[${ipv6}]' WHERE listen = '::';" >/dev/null 2>&1
+
     echo -e "${green}IPv6 certificate installed and configured successfully!${plain}"
+    echo -e "${green}Panel IPv6 address set to: [${ipv6}]${plain}"
     return 0
 }
 
@@ -383,6 +405,17 @@ setup_ip_certificate() {
         echo -e "  Key: ${certDir}/privkey.pem"
     else
         echo -e "${green}Certificate paths configured successfully${plain}"
+    fi
+
+    # Set webDomain based on available IP
+    if [[ -n "$ipv6" ]] && is_ipv6 "$ipv6"; then
+        sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '[${ipv6}]');" >/dev/null 2>&1
+        sqlite3 /etc/x-ui/x-ui.db "UPDATE inbounds SET listen = '[${ipv6}]' WHERE listen = '::';" >/dev/null 2>&1
+        echo -e "${green}Panel address set to: [${ipv6}]${plain}"
+    else
+        sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '${ipv4}');" >/dev/null 2>&1
+        sqlite3 /etc/x-ui/x-ui.db "UPDATE inbounds SET listen = '${ipv4}' WHERE listen = '::';" >/dev/null 2>&1
+        echo -e "${green}Panel address set to: ${ipv4}${plain}"
     fi
 
     echo -e "${green}IP certificate installed and configured successfully!${plain}"
@@ -566,7 +599,7 @@ prompt_and_setup_ssl() {
     echo -e "${yellow}Choose SSL certificate setup method:${plain}"
     
     # Check if domain is configured
-    if [[ "${PANEL_USE_DOMAIN}" == "true" && -n "${PANEL_HOST}" ]]; then
+    if [[ "${PANEL_USE_DOMAIN}" == "true" && -n "${PANEL_HOST}" && "${PANEL_HOST}" != "${PANEL_SERVER_IP}" ]]; then
         echo -e "${green}✓ Domain detected: ${PANEL_HOST}${plain}"
         echo ""
         echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
