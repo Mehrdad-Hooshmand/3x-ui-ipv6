@@ -596,7 +596,10 @@ prompt_and_setup_ssl() {
 
     local ssl_choice=""
 
-    echo -e "${yellow}Choose SSL certificate setup method:${plain}"
+    echo ""
+    echo -e "${green}═══════════════════════════════════════════${plain}"
+    echo -e "${green}     SSL Certificate Setup               ${plain}"
+    echo -e "${green}═══════════════════════════════════════════${plain}"
     
     # Check if domain is configured
     if [[ "${PANEL_USE_DOMAIN}" == "true" && -n "${PANEL_HOST}" && "${PANEL_HOST}" != "${PANEL_SERVER_IP}" ]]; then
@@ -604,6 +607,7 @@ prompt_and_setup_ssl() {
         echo ""
         echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
         echo -e "${green}2.${plain} Skip SSL setup"
+        echo ""
         read -rp "Choose an option (default 1): " ssl_choice
         ssl_choice="${ssl_choice// /}"
         
@@ -612,27 +616,27 @@ prompt_and_setup_ssl() {
         if [[ "${ssl_choice}" == "1" ]]; then
             echo -e "${green}Setting up SSL for domain: ${PANEL_HOST}${plain}"
             # Use domain SSL setup
-            setup_ssl_certificate "${PANEL_HOST}" "${server_ip}" "${panel_port}" "${web_base_path}"
+            setup_ssl_certificate "${PANEL_HOST}" "${PANEL_SERVER_IP}" "${panel_port}" "${web_base_path}"
             SSL_HOST="${PANEL_HOST}"
         else
             echo -e "${yellow}Skipping SSL setup${plain}"
             SSL_HOST="${PANEL_HOST}"
         fi
     else
-        # IP-based panel - use PANEL_SERVER_IP instead of PANEL_HOST
-        local actual_ip="${PANEL_SERVER_IP:-${server_ip}}"
-        echo -e "${green}Panel configured with IP: ${actual_ip}${plain}"
+        # IP-based panel - use PANEL_SERVER_IP
+        echo -e "${blue}Panel Host: ${PANEL_HOST}${plain}"
         echo ""
         echo -e "${green}1.${plain} Let's Encrypt for IP Address (6-day validity, auto-renews)"
         echo -e "${green}2.${plain} Skip SSL setup"
         echo -e "${blue}Note:${plain} IP certificates require port 80 open and use shortlived profile."
+        echo ""
         read -rp "Choose an option (default 1): " ssl_choice
         ssl_choice="${ssl_choice// /}"
         
         [[ -z "${ssl_choice}" ]] && ssl_choice="1"
         
         if [[ "${ssl_choice}" == "1" ]]; then
-            echo -e "${green}Setting up SSL for IP: ${actual_ip}${plain}"
+            echo -e "${green}Setting up SSL for IP: ${PANEL_HOST}${plain}"
             
             # Stop panel if running
             if [[ $release == "alpine" ]]; then
@@ -642,34 +646,34 @@ prompt_and_setup_ssl() {
             fi
             
             # Check if server_ip is IPv6
-            if is_ipv6 "${actual_ip}"; then
+            if is_ipv6 "${PANEL_HOST}"; then
                 echo -e "${green}✓ IPv6 detected${plain}"
-                setup_ipv6_only_certificate "${actual_ip}"
+                setup_ipv6_only_certificate "${PANEL_HOST}"
             else
                 # IPv4 - check if user also has IPv6
                 if [[ -n "${detected_ipv6}" ]]; then
                     echo ""
                     read -rp "Do you also want to add IPv6 (${detected_ipv6}) to certificate? (y/n, default n): " add_ipv6
                     if [[ "${add_ipv6}" == "y" || "${add_ipv6}" == "Y" ]]; then
-                        setup_ip_certificate "${actual_ip}" "${detected_ipv6}"
+                        setup_ip_certificate "${PANEL_HOST}" "${detected_ipv6}"
                     else
-                        setup_ip_certificate "${actual_ip}" ""
+                        setup_ip_certificate "${PANEL_HOST}" ""
                     fi
                 else
-                    setup_ip_certificate "${actual_ip}" ""
+                    setup_ip_certificate "${PANEL_HOST}" ""
                 fi
             fi
             
             if [ $? -eq 0 ]; then
-                SSL_HOST="${actual_ip}"
+                SSL_HOST="${PANEL_HOST}"
                 echo -e "${green}✓ SSL certificate configured successfully${plain}"
             else
                 echo -e "${red}✗ SSL setup failed${plain}"
-                SSL_HOST="${actual_ip}"
+                SSL_HOST="${PANEL_HOST}"
             fi
         else
             echo -e "${yellow}Skipping SSL setup${plain}"
-            SSL_HOST="${actual_ip}"
+            SSL_HOST="${PANEL_HOST}"
         fi
     fi
 }
@@ -891,7 +895,7 @@ config_after_install() {
     local existing_port=$(${xui_folder}/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
     local existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
     
-    # MODIFIED: Ask user for panel IP (supports IPv6)
+    # MODIFIED: Ask user for panel IP (supports IPv6) - ONLY ONCE
     local server_ip=$(ask_for_panel_ip)
 
     if [[ ${#existing_webBasePath} -lt 4 ]]; then
@@ -911,14 +915,7 @@ config_after_install() {
             
             ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
             
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL Certificate Setup (MANDATORY)     ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}For security, SSL certificate is required for all panels.${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
-
+            # SSL setup using already configured PANEL_HOST and PANEL_SERVER_IP
             prompt_and_setup_ssl "${config_port}" "${config_webBasePath}" "${server_ip}"
             
             echo ""
@@ -932,7 +929,6 @@ config_after_install() {
             echo -e "${green}Access URL:  https://${SSL_HOST}:${config_port}/${config_webBasePath}${plain}"
             echo -e "${green}═══════════════════════════════════════════${plain}"
             echo -e "${yellow}⚠ IMPORTANT: Save these credentials securely!${plain}"
-            echo -e "${yellow}⚠ SSL Certificate: Enabled and configured${plain}"
         else
             local config_webBasePath=$(gen_random_string 18)
             echo -e "${yellow}WebBasePath is missing or too short. Generating a new one...${plain}"
@@ -940,12 +936,6 @@ config_after_install() {
             echo -e "${green}New WebBasePath: ${config_webBasePath}${plain}"
 
             if [[ -z "${existing_cert}" ]]; then
-                echo ""
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${green}     SSL Certificate Setup (RECOMMENDED)   ${plain}"
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-                echo ""
                 prompt_and_setup_ssl "${existing_port}" "${config_webBasePath}" "${server_ip}"
                 echo -e "${green}Access URL:  https://${SSL_HOST}:${existing_port}/${config_webBasePath}${plain}"
             else
@@ -970,12 +960,6 @@ config_after_install() {
 
         existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
         if [[ -z "$existing_cert" ]]; then
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL Certificate Setup (RECOMMENDED)   ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
             prompt_and_setup_ssl "${existing_port}" "${existing_webBasePath}" "${server_ip}"
             echo -e "${green}Access URL: https://${SSL_HOST}:${existing_port}/${existing_webBasePath}${plain}"
         else
